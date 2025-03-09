@@ -8,6 +8,11 @@ from transformers.trainer import (
     has_length,
 )
 from typing import List, Optional
+from chunkoptim.utils import chunkize, SecoCache
+
+from functools import partial
+import torch.distributed as dist
+
 
 
 def maybe_zero_3(param, ignore_status=False, name=None):
@@ -24,10 +29,12 @@ def maybe_zero_3(param, ignore_status=False, name=None):
     return param
 
 
+
 def get_mm_adapter_state_maybe_zero_3(named_params, keys_to_match):
     to_return = {k: t for k, t in named_params if any(key_match in k for key_match in keys_to_match)}
     to_return = {k: maybe_zero_3(v, ignore_status=True, name=k).cpu() for k, v in to_return.items()}
     return to_return
+
 
 
 def split_to_even_chunks(indices, lengths, num_chunks):
@@ -50,6 +57,7 @@ def split_to_even_chunks(indices, lengths, num_chunks):
             chunks_lengths[shortest_chunk] = float("inf")
 
     return chunks
+
 
 
 def get_modality_length_grouped_indices(lengths, batch_size, world_size, generator=None):
@@ -84,6 +92,7 @@ def get_modality_length_grouped_indices(lengths, batch_size, world_size, generat
     return [i for megabatch in megabatches for i in megabatch]
 
 
+
 def get_length_grouped_indices(lengths, batch_size, world_size, generator=None, merge=True):
     # We need to use torch for the random part as a distributed sampler will set the random seed for torch.
     indices = torch.randperm(len(lengths), generator=generator)
@@ -95,12 +104,12 @@ def get_length_grouped_indices(lengths, batch_size, world_size, generator=None, 
     return [i for megabatch in megabatches for batch in megabatch for i in batch]
 
 
+
 class LengthGroupedSampler(Sampler):
     r"""
     Sampler that samples indices in a way that groups together features of the dataset of roughly the same length while
     keeping a bit of randomness.
     """
-
     def __init__(
         self,
         batch_size: int,
@@ -118,8 +127,10 @@ class LengthGroupedSampler(Sampler):
         self.generator = generator
         self.group_by_modality = group_by_modality
 
+
     def __len__(self):
         return len(self.lengths)
+
 
     def __iter__(self):
         if self.group_by_modality:
@@ -127,6 +138,7 @@ class LengthGroupedSampler(Sampler):
         else:
             indices = get_length_grouped_indices(self.lengths, self.batch_size, self.world_size, generator=self.generator)
         return iter(indices)
+
 
 
 class LLaVATrainer(Trainer):
@@ -146,6 +158,7 @@ class LLaVATrainer(Trainer):
             )
         else:
             return super()._get_train_sampler()
+
 
     def _save_checkpoint(self, model, trial, metrics=None):
         if getattr(self.args, 'tune_mm_mlp_adapter', False):
@@ -168,8 +181,111 @@ class LLaVATrainer(Trainer):
         else:
             super(LLaVATrainer, self)._save_checkpoint(model, trial, metrics)
 
+
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
         if getattr(self.args, 'tune_mm_mlp_adapter', False):
             pass
         else:
             super(LLaVATrainer, self)._save(output_dir, state_dict)
+
+
+    def training_step(self, model, inputs):
+
+        chunk_size = 128
+        valid_label_count = (inputs['labels'] != -100).sum()
+
+        # vision encoder forward prop
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16), torch.no_grad():
+            _, attention_mask, _, inputs_embeds, labels, image_masks = model.prepare_inputs_labels_for_multimodal(
+                input_ids=inputs['input_ids'],
+                attention_mask=inputs['attention_mask'],
+                past_key_values=None,
+                labels=inputs['labels'],
+                images=inputs['images'])
+            
+        # gather length & calculate maximum length
+        bsz, seq_len, hidden_size = inputs_embeds.shape
+        length_pool = [torch.tensor(0, device='cuda') for _ in range(dist.get_world_size())]
+        dist.all_gather(length_pool, torch.tensor(seq_len, device='cuda'))
+        max_length = max([x.item() for x in length_pool])
+        pad_length = max_length - seq_len
+
+        # pad input tensors
+        if pad_length > 0:
+            inputs_embeds = torch.cat([
+                inputs_embeds, 
+                torch.zeros((bsz, pad_length, hidden_size), dtype=inputs_embeds.dtype, device='cuda')],
+                dim=1)
+            labels = torch.cat([
+                labels, 
+                torch.full((bsz, pad_length), fill_value=-100, dtype=torch.int64, device='cuda')],
+                dim=1)
+            attention_mask = torch.cat([
+                attention_mask, 
+                torch.full((bsz, pad_length), fill_value=False, dtype=torch.bool, device='cuda')],
+                dim=1)
+
+        inputs_embeds_detach = inputs_embeds.detach()
+        inputs_embeds_detach.requires_grad_(True)
+
+        inputs_embeds_list = list(chunkize(inputs_embeds_detach, dim=1, chunk_size=chunk_size))
+        labels_list = list(chunkize(labels, dim=1, chunk_size=chunk_size))
+        attention_mask = list(chunkize(attention_mask, dim=1, chunk_size=chunk_size))
+        # image_masks = list(chunkize(torch.tensor(image_masks), dim=1, chunk_size=chunk_size))
+
+        num_layers = len(model.model.layers)
+        seco_cache = SecoCache(num_layers)
+
+        accum_loss = 0
+
+        # LLM forward prop
+        with torch.no_grad():
+            for i, (chunk_embeds, chunk_labels) in enumerate(zip(inputs_embeds_list, labels_list)):
+            
+                outputs = model(
+                    input_ids=None,
+                    attention_mask=torch.cat(attention_mask[:i+1], dim=1),
+                    inputs_embeds=chunk_embeds,
+                    labels=chunk_labels,
+                    past_key_values=seco_cache)
+                
+                accum_loss += outputs['loss'].sum() / valid_label_count
+
+        generator = reversed(list(enumerate(zip(inputs_embeds_list, labels_list))))
+
+        # LLM backward prop
+        for i, (chunk_embeds, chunk_labels,) in generator:
+
+            tmp_cache = seco_cache.range(i)
+
+            outputs = model(
+                input_ids=None,
+                attention_mask=torch.cat(attention_mask[:i+1], dim=1),
+                inputs_embeds=chunk_embeds,
+                labels=chunk_labels,
+                past_key_values=tmp_cache)
+            
+            loss = outputs['loss'].sum() / valid_label_count
+
+            tmp_cache.index(i).copy_scaled_grad(gd=seco_cache.index(i).grad)
+            self.accelerator.backward(loss)
+
+        # def set_to_incomming_grad(base_grad, incomming_grad):
+        #     try:
+        #         assert base_grad.shape == incomming_grad
+        #     except:
+        #         import IPython
+        #         IPython.embed()
+        #     """
+        #     ignore base gradient
+        #     """
+        #     return incomming_grad
+        
+        # inputs_embeds.register_hook(partial(
+        #     set_to_incomming_grad, 
+        #     incomming_grad=inputs_embeds_detach.grad))
+
+        # loss = inputs_embeds.sum()
+        # self.accelerator.backward(loss)
+
+        return accum_loss

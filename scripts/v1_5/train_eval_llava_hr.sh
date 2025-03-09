@@ -1,12 +1,33 @@
 #!/bin/bash
 
 
-deepspeed llava_hr/train/train_mem.py \
-    --deepspeed ./scripts/zero3.json \
-    --model_name_or_path /data/vicuna/vicuna-7b-v1.5 \
+MASTER_ADDR=`scontrol show hostname $SLURM_JOB_NODELIST | head -n1`
+MASTER_PORT=$((RANDOM % 101 + 20000))
+
+
+function makehostfile() {
+    > hostfile
+    slots=8
+    nodes=$(scontrol show hostnames $SLURM_JOB_NODELIST)
+    for node in $nodes; do
+        echo "$node slots=$slots" >> hostfile
+    done
+}
+makehostfile
+
+
+deepspeed \
+    --launcher SLURM \
+    --master_addr=${MASTER_ADDR} \
+    --master_port=${MASTER_PORT} \
+    --hostfile='hostfile' \
+    --no_ssh_check \
+    llava_hr/train/train_mem.py \
+    --deepspeed ./scripts/zero2.json \
+    --model_name_or_path lmsys/vicuna-7b-v1.5 \
     --version v1 \
-    --data_path ./playground/data/llava_v1_5_mix665k.json \
-    --image_folder ./playground/data \
+    --data_path playground/data/llava_v1_5_mix665k.json \
+    --image_folder playground/data \
     --vision_tower openai/clip-vit-large-patch14-336 \
     --vision_tower_slow convnext_large_mlp.clip_laion2b_ft_320 \
     --pretrain_mm_mlp_adapter ./checkpoints/llava-hr-7b-pretrain-384/mm_projector.bin \
@@ -17,7 +38,7 @@ deepspeed llava_hr/train/train_mem.py \
     --image_aspect_ratio pad \
     --group_by_modality_length True \
     --bf16 True \
-    --output_dir ./checkpoints/llava-hr-7b-sft-1024 \
+    --output_dir ./checkpoints/llava-hr-7b-sft-1024-new \
     --num_train_epochs 1 \
     --per_device_train_batch_size 8 \
     --per_device_eval_batch_size 4 \
@@ -39,6 +60,7 @@ deepspeed llava_hr/train/train_mem.py \
     --report_to wandb \
     --is_multipath_encoder True \
     --freeze_vision False \
-    --input_image_size 1024
+    --input_image_size 1024 \
+    --modify v1
 
-bash scripts/v1_5/eval.sh ./checkpoints/llava-hr-7b-sft-1024 2>&1 | tee log-llava-hr-7b-sft-1024.txt
+# bash scripts/v1_5/eval.sh ./checkpoints/llava-hr-7b-sft-1024 2>&1 | tee log-llava-hr-7b-sft-1024.txt

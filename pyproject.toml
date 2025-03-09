@@ -17,7 +17,7 @@ dependencies = [
     "requests", "sentencepiece", "tokenizers>=0.12.1",
     "torch==2.1.0", "torchvision==0.16.0", "uvicorn", "wandb",
     "shortuuid", "httpx==0.24.0",
-    "deepspeed==0.9.5",
+    "deepspeed==0.12.0",
     "peft==0.4.0",
     "transformers==4.31.0",
     "accelerate==0.21.0",

@@ -5,25 +5,7 @@ MASTER_ADDR=`scontrol show hostname $SLURM_JOB_NODELIST | head -n1`
 MASTER_PORT=$((RANDOM % 101 + 20000))
 
 
-function makehostfile() {
-    > hostfile
-    slots=8
-    nodes=$(scontrol show hostnames $SLURM_JOB_NODELIST)
-    for node in $nodes; do
-        echo "$node slots=$slots" >> hostfile
-    done
-}
-makehostfile
-
-
-deepspeed \
-    --launcher SLURM \
-    --master_addr=${MASTER_ADDR} \
-    --master_port=${MASTER_PORT} \
-    --hostfile='hostfile' \
-    --no_ssh_check \
-    llava_hr/train/train_mem.py \
-    --deepspeed ./scripts/zero2.json \
+srun -p INTERN2 --job-name=03051200 --nodes=1 --gres=gpu:1 --ntasks=1 --cpus-per-task=12 --quotatype=reserved --kill-on-bad-exit=1 python llava_hr/train/train_mem.py \
     --model_name_or_path lmsys/vicuna-7b-v1.5 \
     --version plain \
     --data_path playground/data/pretrain/blip_laion_cc_sbu_558k.json \
@@ -57,4 +39,5 @@ deepspeed \
     --lazy_preprocess True \
     --report_to wandb \
     --is_multipath_encoder True \
-    --input_image_size 384
+    --input_image_size 384 \
+    --modify v1
