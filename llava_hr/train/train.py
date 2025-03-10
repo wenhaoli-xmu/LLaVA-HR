@@ -42,6 +42,8 @@ local_rank = None
 
 import tokenizers
 from packaging import version
+from .train_seco import maybe_modify_training_method
+import types
 
 
 def rank0_print(*args):
@@ -1205,6 +1207,7 @@ def train():
 
     if model_args.version == "v0":
         if tokenizer.pad_token is None:
+            print(f"Adding pad token as '[PAD]'")
             smart_tokenizer_and_embedding_resize(
                 special_tokens_dict=dict(pad_token="[PAD]"),
                 tokenizer=tokenizer,
@@ -1212,12 +1215,28 @@ def train():
             )
     elif model_args.version == "v0.5":
         tokenizer.pad_token = tokenizer.unk_token
-    else:
+    elif model_args.version == "v1":
         tokenizer.pad_token = tokenizer.unk_token
         if model_args.version in conversation_lib.conv_templates:
             conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
         else:
             conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
+    else:
+        # =============================================================================================
+        if tokenizer.pad_token is None:
+            print(f"Adding pad token as '<pad>'")
+            smart_tokenizer_and_embedding_resize(
+                special_tokens_dict=dict(pad_token="<pad>"),
+                tokenizer=tokenizer,
+                model=model,
+            )
+        if model_args.version in conversation_lib.conv_templates:
+            conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
+        else:
+            conversation_lib.default_conversation = conversation_lib.conv_templates["llama3"]
+        print(f"Using conversation format: {conversation_lib.default_conversation.version}")
+        # =============================================================================================
+
 
     if model_args.vision_tower is not None:
         model.get_model().initialize_vision_modules(
@@ -1329,6 +1348,11 @@ def train():
                            tokenizer=tokenizer,
                            args=training_args,
                            **data_module)
+    
+    # =======================================================================
+    maybe_modify_training_method(trainer)
+    # =======================================================================
+
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)

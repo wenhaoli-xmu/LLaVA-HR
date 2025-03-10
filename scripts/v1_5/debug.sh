@@ -18,7 +18,7 @@ srun -p INTERN2 --job-name=03051200 --nodes=1 --gres=gpu:1 --ntasks=1 --cpus-per
     --mm_use_im_start_end False \
     --mm_use_im_patch_token False \
     --bf16 True \
-    --output_dir ./checkpoints/llava-hr-7b-pretrain-384-new \
+    --output_dir ./checkpoints/llava-hr-7b-pretrain-384-debug \
     --num_train_epochs 1 \
     --per_device_train_batch_size 32 \
     --per_device_eval_batch_size 4 \
@@ -37,7 +37,7 @@ srun -p INTERN2 --job-name=03051200 --nodes=1 --gres=gpu:1 --ntasks=1 --cpus-per
     --gradient_checkpointing True \
     --dataloader_num_workers 4 \
     --lazy_preprocess True \
-    --report_to wandb \
+    --report_to none \
     --is_multipath_encoder True \
     --input_image_size 384 \
     --modify v1

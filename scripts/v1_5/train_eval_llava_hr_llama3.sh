@@ -24,8 +24,8 @@ deepspeed \
     --no_ssh_check \
     llava_hr/train/train_mem.py \
     --deepspeed ./scripts/zero2.json \
-    --model_name_or_path lmsys/vicuna-7b-v1.5 \
-    --version v1 \
+    --model_name_or_path unsloth/llama-3-8b-Instruct \
+    --version llama3 \
     --data_path playground/data/llava_v1_5_mix665k.json \
     --image_folder playground/data \
     --vision_tower openai/clip-vit-large-patch14-336 \
@@ -38,16 +38,16 @@ deepspeed \
     --image_aspect_ratio pad \
     --group_by_modality_length True \
     --bf16 True \
-    --output_dir ./checkpoints/llava-hr-7b-sft-1024-seco \
+    --output_dir ./checkpoints/llava-hr-8b-sft-1024-seco \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 8 \
+    --per_device_train_batch_size 16 \
     --per_device_eval_batch_size 4 \
-    --gradient_accumulation_steps 2 \
+    --gradient_accumulation_steps 1 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
     --save_steps 50000 \
     --save_total_limit 1 \
-    --learning_rate 2e-5 \
+    --learning_rate 1e-5 \
     --weight_decay 0. \
     --warmup_ratio 0.03 \
     --lr_scheduler_type "cosine" \

@@ -58,21 +58,21 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
 
 
     # ===============================================================================
-    def activate_modify(self, version):
+    def activate_modify(self, modify_version):
 
-        self.version = version
+        self.modify_version = modify_version
 
-        if version == 'v0':
+        if modify_version == 'v0':
             from .modify_llava_llama_v0 import (
                 model_forward,
                 layer_forward,
                 attn_forward)
-        elif version == 'v1':
+        elif modify_version == 'v1':
             from .modify_llava_llama_v1 import (
                 model_forward,
                 layer_forward,
                 attn_forward)
-        else: raise NotImplementedError(version)
+        else: raise NotImplementedError(modify_version)
 
         self.model.forward = types.MethodType(model_forward, self.model)
 
@@ -95,6 +95,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         images: Optional[torch.FloatTensor] = None,
         return_dict: Optional[bool] = None,
         image_masks: Optional[List[List[int]]] = None,
+        cache_position = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
