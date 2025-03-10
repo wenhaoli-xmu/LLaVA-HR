@@ -191,12 +191,12 @@ class LLaVATrainer(Trainer):
 
     def training_step(self, model, inputs):
 
-        chunk_size = 128
+        chunk_size = 64
         valid_label_count = (inputs['labels'] != -100).sum()
 
         # vision encoder forward prop
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16), torch.no_grad():
-            _, attention_mask, _, inputs_embeds, labels, image_masks = model.prepare_inputs_labels_for_multimodal(
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+            _, attention_mask, _, inputs_embeds, labels, _ = model.prepare_inputs_labels_for_multimodal(
                 input_ids=inputs['input_ids'],
                 attention_mask=inputs['attention_mask'],
                 past_key_values=None,
@@ -270,22 +270,13 @@ class LLaVATrainer(Trainer):
             tmp_cache.index(i).copy_scaled_grad(gd=seco_cache.index(i).grad)
             self.accelerator.backward(loss)
 
-        # def set_to_incomming_grad(base_grad, incomming_grad):
-        #     try:
-        #         assert base_grad.shape == incomming_grad
-        #     except:
-        #         import IPython
-        #         IPython.embed()
-        #     """
-        #     ignore base gradient
-        #     """
-        #     return incomming_grad
+        def set_to_incomming_grad(base_grad, incomming_grad):
+            return incomming_grad
         
-        # inputs_embeds.register_hook(partial(
-        #     set_to_incomming_grad, 
-        #     incomming_grad=inputs_embeds_detach.grad))
+        inputs_embeds.register_hook(partial(
+            set_to_incomming_grad, 
+            incomming_grad=inputs_embeds_detach.grad))
 
-        # loss = inputs_embeds.sum()
-        # self.accelerator.backward(loss)
+        self.accelerator.backward(inputs_embeds.sum())
 
         return accum_loss

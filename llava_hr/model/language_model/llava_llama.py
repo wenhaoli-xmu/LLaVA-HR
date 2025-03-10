@@ -82,7 +82,6 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
     # ===============================================================================
 
 
-
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -104,8 +103,20 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # ========================================================================================================================================================================================
-        if input_ids is not None and inputs_embeds is None:
-            input_ids, attention_mask, past_key_values, inputs_embeds, labels, image_masks = self.prepare_inputs_labels_for_multimodal(input_ids, attention_mask, past_key_values, labels, images)
+        if inputs_embeds is None:
+            (
+                input_ids, 
+                attention_mask, 
+                past_key_values, 
+                inputs_embeds, 
+                labels, 
+                image_masks
+            ) = self.prepare_inputs_labels_for_multimodal(
+                input_ids, 
+                attention_mask, 
+                past_key_values, 
+                labels, 
+                images)
 
         arguments = dict(image_masks=image_masks) if hasattr(self, 'version') else dict()
         arguments.update(dict(

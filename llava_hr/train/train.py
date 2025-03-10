@@ -40,6 +40,9 @@ import random
 Image.MAX_IMAGE_PIXELS=230000000000
 local_rank = None
 
+import tokenizers
+from packaging import version
+
 
 def rank0_print(*args):
     if local_rank == 0:
