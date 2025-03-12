@@ -248,6 +248,48 @@ def layer_forward(
     return hidden_states, new_key_states, new_value_states
 
 
+def generate_mask(num_query, num_kv, dtype, device):
+    mask = torch.full(
+        (1, 1, num_query, num_kv), 
+        torch.finfo(torch.float32).min, 
+        dtype=torch.float32, 
+        device=device
+    )
+    assert num_query <= num_kv
+    mask[0,0,:,-num_query:].triu_(diagonal=1)
+    mask[0,0,:,:-num_query].fill_(0)
+    mask = mask.type(dtype)
+    return mask
+
+
+def float64_attention(q, k, v, causal=False):
+    num_q_heads = q.shape[-2]
+    num_kv_heads = k.shape[-2]
+
+    head_dim = q.shape[-1]  # Head dimension
+    
+    # Expand keys/values if needed for GQA
+    if num_q_heads > num_kv_heads:
+        expand_factor = num_q_heads // num_kv_heads
+        k = k.tile(1, 1, expand_factor, 1)
+        v = v.tile(1, 1, expand_factor, 1)
+    
+    # Compute scaled dot-product attention
+    attn_scores = torch.einsum("bqhd, bkhd -> bhqk", q, k) / head_dim**0.5
+    
+    if causal:
+        mask = generate_mask(
+            num_query=attn_scores.shape[-2], 
+            num_kv=attn_scores.shape[-1], 
+            dtype=attn_scores.dtype, 
+            device=attn_scores.device)
+        attn_scores += mask
+    
+    attn_probs = F.softmax(attn_scores, dim=-1)
+    attn_output = torch.einsum("bhqk,bkhd->bqhd", attn_probs, v)
+    
+    return attn_output
+
 
 def attn_forward(
     self,
@@ -315,22 +357,24 @@ def attn_forward(
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-    # =============================================================
-    attn_output = torch.nn.functional.scaled_dot_product_attention(
-        query=query_states,
-        key=key_states,
-        value=value_states,
-        attn_mask=attention_mask)
-    # =============================================================
+    # =================================================================
+    if hidden_states.dtype == torch.float64:
+        attn_output = float64_attention(
+            q=query_states.transpose(-2,-3),
+            k=key_states.transpose(-2,-3),
+            v=value_states.transpose(-2,-3),
+            causal=True)
+        attn_output = attn_output.flatten(2)
+    else:
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            query=query_states,
+            key=key_states,
+            value=value_states,
+            attn_mask=attention_mask)
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+    # =================================================================
 
-    if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
-        raise ValueError(
-            f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
-            f" {attn_output.size()}"
-        )
-
-    attn_output = attn_output.transpose(1, 2).contiguous()
-    attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
     if self.pretraining_tp > 1:
         attn_output = attn_output.split(self.hidden_size // self.pretraining_tp, dim=2)

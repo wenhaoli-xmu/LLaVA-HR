@@ -95,7 +95,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         images: Optional[torch.FloatTensor] = None,
         return_dict: Optional[bool] = None,
         image_masks: Optional[List[List[int]]] = None,
-        cache_position = None,
+        shift_label: Optional[bool] = True,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -103,7 +103,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        # ========================================================================================================================================================================================
+        # ======================================================================================
         if inputs_embeds is None:
             (
                 input_ids, 
@@ -119,7 +119,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
                 labels, 
                 images)
 
-        arguments = dict(image_masks=image_masks) if hasattr(self, 'version') else dict()
+        arguments = dict(image_masks=image_masks) if hasattr(self, 'modify_version') else dict()
         arguments.update(dict(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -129,9 +129,9 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict))
-        
+
         outputs = self.model(**arguments)
-        # ========================================================================================================================================================================================
+        # ======================================================================================
 
         hidden_states = outputs[0]
         logits = self.lm_head(hidden_states)
@@ -139,9 +139,14 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         loss = None
         if labels is not None:
 
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
+            # =================================================
+            if shift_label:
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = labels[..., 1:].contiguous()
+            else:
+                shift_logits = logits.contiguous()
+                shift_labels = labels.contiguous()
+            # =================================================
 
             # Flatten the tokens
             shift_logits = shift_logits.view(-1, self.config.vocab_size)
@@ -150,9 +155,10 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             # Enable model/pipeline parallelism
             shift_labels = shift_labels.to(shift_logits.device)
 
-            # ================================================================================
-            loss = torch.nn.functional.cross_entropy(shift_logits, shift_labels, reduce=False)
-            # ================================================================================
+            # ====================================================================================
+            is_reduce = False if hasattr(self, 'modify_version') else True
+            loss = torch.nn.functional.cross_entropy(shift_logits, shift_labels, reduce=is_reduce)
+            # ====================================================================================
 
         return CausalLMOutputWithPast(loss=loss)
 

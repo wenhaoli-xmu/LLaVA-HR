@@ -42,7 +42,7 @@ local_rank = None
 
 import tokenizers
 from packaging import version
-from .train_seco import maybe_modify_training_method
+from .train_seco import reset_training_step
 import types
 
 
@@ -1349,10 +1349,9 @@ def train():
                            args=training_args,
                            **data_module)
     
-    # =======================================================================
-    maybe_modify_training_method(trainer)
-    # =======================================================================
-
+    # ==========================
+    reset_training_step(trainer)
+    # ==========================
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)

@@ -38,7 +38,7 @@ deepspeed \
     --image_aspect_ratio pad \
     --group_by_modality_length True \
     --bf16 True \
-    --output_dir ./checkpoints/llava-hr-7b-sft-1024-seco \
+    --output_dir ./checkpoints/baseline-7b \
     --num_train_epochs 1 \
     --per_device_train_batch_size 8 \
     --per_device_eval_batch_size 4 \
@@ -60,7 +60,6 @@ deepspeed \
     --report_to wandb \
     --is_multipath_encoder True \
     --freeze_vision False \
-    --input_image_size 1024 \
-    --modify v1
+    --input_image_size 1024
 
 # bash scripts/v1_5/eval.sh ./checkpoints/llava-hr-7b-sft-1024 2>&1 | tee log-llava-hr-7b-sft-1024.txt
