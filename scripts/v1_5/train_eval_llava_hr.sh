@@ -23,14 +23,14 @@ deepspeed \
     --hostfile='hostfile' \
     --no_ssh_check \
     llava_hr/train/train_mem.py \
-    --deepspeed ./scripts/zero2.json \
+    --deepspeed ./scripts/zero3.json \
     --model_name_or_path lmsys/vicuna-7b-v1.5 \
     --version v1 \
     --data_path playground/data/llava_v1_5_mix665k.json \
     --image_folder playground/data \
     --vision_tower openai/clip-vit-large-patch14-336 \
     --vision_tower_slow convnext_large_mlp.clip_laion2b_ft_320 \
-    --pretrain_mm_mlp_adapter ./checkpoints/llava-hr-7b-pretrain-384/mm_projector.bin \
+    --pretrain_mm_mlp_adapter ./checkpoints/pretrain-7b/mm_projector.bin \
     --mm_projector_type mlp2x_gelu \
     --mm_vision_select_layer -2 \
     --mm_use_im_start_end False \
@@ -60,6 +60,7 @@ deepspeed \
     --report_to wandb \
     --is_multipath_encoder True \
     --freeze_vision False \
-    --input_image_size 1024
+    --input_image_size 1024 \
+    --modify v1
 
 # bash scripts/v1_5/eval.sh ./checkpoints/llava-hr-7b-sft-1024 2>&1 | tee log-llava-hr-7b-sft-1024.txt

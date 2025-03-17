@@ -42,8 +42,7 @@ local_rank = None
 
 import tokenizers
 from packaging import version
-from .train_seco import reset_training_step
-import types
+from .train_efficient import reset_training_step
 
 
 def rank0_print(*args):

@@ -36,7 +36,7 @@ deepspeed \
     --mm_use_im_start_end False \
     --mm_use_im_patch_token False \
     --bf16 True \
-    --output_dir ./checkpoints/llava-hr-7b-pretrain-384-new \
+    --output_dir ./checkpoints/pretrain-7b \
     --num_train_epochs 1 \
     --per_device_train_batch_size 32 \
     --per_device_eval_batch_size 4 \

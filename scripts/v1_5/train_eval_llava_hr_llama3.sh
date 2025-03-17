@@ -30,7 +30,7 @@ deepspeed \
     --image_folder playground/data \
     --vision_tower openai/clip-vit-large-patch14-336 \
     --vision_tower_slow convnext_large_mlp.clip_laion2b_ft_320 \
-    --pretrain_mm_mlp_adapter ./checkpoints/llava-hr-7b-pretrain-384/mm_projector.bin \
+    --pretrain_mm_mlp_adapter ./checkpoints/pretrain-8b/mm_projector.bin \
     --mm_projector_type mlp2x_gelu \
     --mm_vision_select_layer -2 \
     --mm_use_im_start_end False \
@@ -40,14 +40,14 @@ deepspeed \
     --bf16 True \
     --output_dir ./checkpoints/baseline-8b \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 16 \
+    --per_device_train_batch_size 8 \
     --per_device_eval_batch_size 4 \
-    --gradient_accumulation_steps 1 \
+    --gradient_accumulation_steps 2 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
     --save_steps 50000 \
     --save_total_limit 1 \
-    --learning_rate 1e-5 \
+    --learning_rate 2e-5 \
     --weight_decay 0. \
     --warmup_ratio 0.03 \
     --lr_scheduler_type "cosine" \
@@ -60,6 +60,7 @@ deepspeed \
     --report_to wandb \
     --is_multipath_encoder True \
     --freeze_vision False \
-    --input_image_size 1024
+    --input_image_size 1024 \
+    --modify v1
 
 # bash scripts/v1_5/eval.sh ./checkpoints/llava-hr-7b-sft-1024 2>&1 | tee log-llava-hr-7b-sft-1024.txt
