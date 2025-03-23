@@ -14,6 +14,7 @@ from transformers.models.llama.modeling_llama import (
 
 from chunkoptim.utils import SecoCache
 from llava_hr.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from flash_attn import flash_attn_func
 
 
 def find_boundaries(mask):
@@ -620,10 +621,6 @@ def attn_forward(
         value_states = torch.cat((past_value_tensor, value_states), dim=-2)
     # ========================================================================================
 
-    # repeat k/v heads if n_kv_heads < n_heads
-    key_states = repeat_kv(key_states, self.num_key_value_groups)
-    value_states = repeat_kv(value_states, self.num_key_value_groups)
-
     # =================================================================
     if hidden_states.dtype == torch.float64:
         attn_output = float64_attention(
@@ -633,21 +630,14 @@ def attn_forward(
             causal=True)
         attn_output = attn_output.flatten(2)
     else:
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            query=query_states,
-            key=key_states,
-            value=value_states,
-            attn_mask=attention_mask)
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+        attn_output = flash_attn_func(
+            q=query_states.transpose(-2,-3),
+            k=key_states.transpose(-2,-3),
+            v=value_states.transpose(-2,-3),
+            causal=True)
+        attn_output = attn_output.flatten(2)
     # =================================================================
 
-
-    if self.pretraining_tp > 1:
-        attn_output = attn_output.split(self.hidden_size // self.pretraining_tp, dim=2)
-        o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.pretraining_tp, dim=1)
-        attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.pretraining_tp)])
-    else:
-        attn_output = self.o_proj(attn_output)
+    attn_output = self.o_proj(attn_output)
 
     return attn_output, new_key_states, new_value_states
