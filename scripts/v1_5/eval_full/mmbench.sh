@@ -2,10 +2,12 @@
 
 SPLIT="mmbench_dev_en_20231003"
 MODEL_PATH=$1
+CKPT=llava-spaco-7b
+
 python -m llava_hr.eval.model_vqa_mmbench \
     --model-path $1 \
     --question-file ./playground/data/eval/mmbench/$SPLIT.tsv \
-    --answers-file ./playground/data/eval/mmbench/answers/$SPLIT/llava-v1.5-7b.jsonl \
+    --answers-file ./playground/data/eval/mmbench/answers/$SPLIT/${CKPT}.jsonl \
     --temperature 0 \
     --conv-mode vicuna_v1
 
@@ -15,4 +17,4 @@ python scripts/convert_mmbench_for_submission.py \
     --annotation-file ./playground/data/eval/mmbench/$SPLIT.tsv \
     --result-dir ./playground/data/eval/mmbench/answers/$SPLIT \
     --upload-dir ./playground/data/eval/mmbench/answers_upload/$SPLIT \
-    --experiment llava-v1.5-7b
+    --experiment $CKPT

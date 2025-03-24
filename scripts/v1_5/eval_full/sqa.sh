@@ -1,6 +1,6 @@
 #!/bin/bash
 MODEL_PATH=$1
-CKPT='llava-8b-baseline'
+CKPT='llava-seco-7b'
 
 python -m llava_hr.eval.model_vqa_science \
     --model-path $1 \
@@ -9,7 +9,7 @@ python -m llava_hr.eval.model_vqa_science \
     --answers-file ./playground/data/eval/scienceqa/answers/${CKPT}.jsonl \
     --single-pred-prompt \
     --temperature 0 \
-    --conv-mode llama3
+    --conv-mode vicuna_v1
 
 python llava_hr/eval/eval_science_qa.py \
     --base-dir ./playground/data/eval/scienceqa \

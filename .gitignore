@@ -28,3 +28,5 @@ ckpts*
 
 .ipynb_checkpoints
 *.ipynb
+attention_visualization
+playground/data

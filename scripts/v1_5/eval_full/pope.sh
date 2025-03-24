@@ -1,6 +1,6 @@
 #!/bin/bash
 MODEL_PATH=$1
-CKPT='llava-8b-baseline'
+CKPT='llava-spaco-7b'
 
 python -m llava_hr.eval.model_vqa_loader \
     --model-path $1 \
@@ -8,7 +8,7 @@ python -m llava_hr.eval.model_vqa_loader \
     --image-folder ./playground/data/eval/pope/val2014 \
     --answers-file ./playground/data/eval/pope/answers/${CKPT}.jsonl \
     --temperature 0 \
-    --conv-mode llama3
+    --conv-mode vicuna_v1
 
 python llava_hr/eval/eval_pope.py \
     --annotation-dir ./playground/data/eval/pope/coco \

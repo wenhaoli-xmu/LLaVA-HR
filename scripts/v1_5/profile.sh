@@ -30,7 +30,7 @@ deepspeed \
     --image_folder playground/data \
     --vision_tower openai/clip-vit-large-patch14-336 \
     --vision_tower_slow convnext_large_mlp.clip_laion2b_ft_320 \
-    --pretrain_mm_mlp_adapter ./checkpoints/pretrain-8b/mm_projector.bin \
+    --pretrain_mm_mlp_adapter checkpoints/pretrain-8b/mm_projector.bin \
     --mm_projector_type mlp2x_gelu \
     --mm_vision_select_layer -2 \
     --mm_use_im_start_end False \
@@ -38,11 +38,11 @@ deepspeed \
     --image_aspect_ratio pad \
     --group_by_modality_length True \
     --bf16 True \
-    --output_dir ./checkpoints/seco-8b \
+    --output_dir checkpoints/profile \
     --num_train_epochs 1 \
     --per_device_train_batch_size 8 \
     --per_device_eval_batch_size 4 \
-    --gradient_accumulation_steps 1 \
+    --gradient_accumulation_steps 2 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
     --save_steps 50000 \
@@ -57,10 +57,10 @@ deepspeed \
     --gradient_checkpointing True \
     --dataloader_num_workers 4 \
     --lazy_preprocess True \
-    --report_to wandb \
+    --report_to none \
     --is_multipath_encoder True \
     --freeze_vision False \
     --input_image_size 1024 \
-    --modify v1-seco
+    --modify v1-profile-seco
 
 # bash scripts/v1_5/eval.sh ./checkpoints/llava-hr-7b-sft-1024 2>&1 | tee log-llava-hr-7b-sft-1024.txt

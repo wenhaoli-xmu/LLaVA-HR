@@ -43,4 +43,4 @@ srun -p INTERN2 --job-name=03051200 --nodes=1 --gres=gpu:1 --ntasks=1 --cpus-per
     --is_multipath_encoder True \
     --freeze_vision False \
     --input_image_size 1024 \
-    --modify v1-seco
+    --modify v1-profile-seco

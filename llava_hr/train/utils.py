@@ -96,7 +96,7 @@ def _first_forward_prop_seco(model, inputs_embeds_list, labels_list, attention_m
             start = i * chunk_size
             end = (i + 1) * chunk_size
             mask = attention_mask[..., start: end, :end]
-        
+
         outputs = model(
             attention_mask=mask,
             inputs_embeds=chunk_embeds,
@@ -104,6 +104,7 @@ def _first_forward_prop_seco(model, inputs_embeds_list, labels_list, attention_m
             past_key_values=seco_cache,
             shift_label=False,
             is_reduce=False)
+
         accum_loss += outputs['loss'].sum() / valid_label_count
 
     return accum_loss, seco_cache

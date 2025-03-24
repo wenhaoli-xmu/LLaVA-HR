@@ -26,41 +26,35 @@ deepspeed \
     --deepspeed ./scripts/zero2.json \
     --model_name_or_path unsloth/llama-3-8b-Instruct \
     --version llama3 \
-    --data_path playground/data/llava_v1_5_mix665k.json \
-    --image_folder playground/data \
+    --data_path playground/data/pretrain/blip_laion_cc_sbu_558k.json \
+    --image_folder playground/data/pretrain/images \
     --vision_tower openai/clip-vit-large-patch14-336 \
     --vision_tower_slow convnext_large_mlp.clip_laion2b_ft_320 \
-    --pretrain_mm_mlp_adapter ./checkpoints/pretrain-8b/mm_projector.bin \
     --mm_projector_type mlp2x_gelu \
+    --tune_mm_mlp_adapter True \
     --mm_vision_select_layer -2 \
     --mm_use_im_start_end False \
     --mm_use_im_patch_token False \
-    --image_aspect_ratio pad \
-    --group_by_modality_length True \
     --bf16 True \
-    --output_dir ./checkpoints/seco-8b \
+    --output_dir ./checkpoints/pretrain-8b \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 8 \
+    --per_device_train_batch_size 32 \
     --per_device_eval_batch_size 4 \
     --gradient_accumulation_steps 1 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
-    --save_steps 50000 \
+    --save_steps 24000 \
     --save_total_limit 1 \
-    --learning_rate 2e-5 \
+    --learning_rate 1e-3 \
     --weight_decay 0. \
     --warmup_ratio 0.03 \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \
     --tf32 True \
-    --model_max_length 2496 \
+    --model_max_length 2048 \
     --gradient_checkpointing True \
     --dataloader_num_workers 4 \
     --lazy_preprocess True \
     --report_to wandb \
     --is_multipath_encoder True \
-    --freeze_vision False \
-    --input_image_size 1024 \
-    --modify v1-seco
-
-# bash scripts/v1_5/eval.sh ./checkpoints/llava-hr-7b-sft-1024 2>&1 | tee log-llava-hr-7b-sft-1024.txt
+    --input_image_size 384

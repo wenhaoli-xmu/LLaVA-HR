@@ -38,11 +38,11 @@ deepspeed \
     --image_aspect_ratio pad \
     --group_by_modality_length True \
     --bf16 True \
-    --output_dir ./checkpoints/seco-8b \
+    --output_dir ./checkpoints/smlp-8b \
     --num_train_epochs 1 \
     --per_device_train_batch_size 8 \
     --per_device_eval_batch_size 4 \
-    --gradient_accumulation_steps 1 \
+    --gradient_accumulation_steps 2 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
     --save_steps 50000 \
@@ -61,6 +61,6 @@ deepspeed \
     --is_multipath_encoder True \
     --freeze_vision False \
     --input_image_size 1024 \
-    --modify v1-seco
+    --modify v2-profile
 
 # bash scripts/v1_5/eval.sh ./checkpoints/llava-hr-7b-sft-1024 2>&1 | tee log-llava-hr-7b-sft-1024.txt

@@ -1,10 +1,12 @@
 #!/bin/bash
 MODEL_PATH=$1
+CKPT=llava-spaco-7b
+
 python -m llava_hr.eval.model_vqa \
     --model-path $MODEL_PATH \
     --question-file ./playground/data/eval/mm-vet/llava-mm-vet.jsonl \
     --image-folder ./playground/data/eval/mm-vet/images \
-    --answers-file ./playground/data/eval/mm-vet/answers/llava-v1.5-7b.jsonl \
+    --answers-file ./playground/data/eval/mm-vet/answers/${CKPT}.jsonl \
     --temperature 0 \
     --conv-mode vicuna_v1 \
     --max_new_tokens 2048
@@ -12,5 +14,5 @@ python -m llava_hr.eval.model_vqa \
 mkdir -p ./playground/data/eval/mm-vet/results
 
 python scripts/convert_mmvet_for_eval.py \
-    --src ./playground/data/eval/mm-vet/answers/llava-v1.5-7b.jsonl \
-    --dst ./playground/data/eval/mm-vet/results/llava-v1.5-7b.json
+    --src ./playground/data/eval/mm-vet/answers/${CKPT}.jsonl \
+    --dst ./playground/data/eval/mm-vet/results/${CKPT}.json
