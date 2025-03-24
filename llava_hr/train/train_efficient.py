@@ -11,12 +11,10 @@ from .utils import (
     _chunkize_inputs,
     _prepare_inputs,
     _sample_chunks,
-    _sample_tokens,
     _step,
     _construct_4d_mask,
     _sample_tokens_v2
 )
-from chunkoptim.utils import SecoCache
 
 
 def reset_training_step(trainer):
@@ -76,7 +74,8 @@ def _seco(self, model, inputs):
         inputs_embeds_list, 
         labels_list, 
         masks_list, 
-        valid_label_count)
+        valid_label_count,
+        cpu_offload=1)
 
     # maybe change chunk size before backward prop
     if fwd_chunk_size != bwd_chunk_size:
@@ -88,18 +87,21 @@ def _seco(self, model, inputs):
     # LLM backward prop
     generator = reversed(list(enumerate(zip(inputs_embeds_list, labels_list))))
     for i, (chunk_embeds, chunk_labels) in generator:
-        tmp_cache = seco_cache.range(i)
+        tmp_cache = seco_cache.index(i)
+        seco_cache.delete(i)
         outputs = model(
             input_ids=None,
             attention_mask=torch.cat(masks_list[:i+1], dim=1),
             inputs_embeds=chunk_embeds,
             labels=chunk_labels,
-            past_key_values=tmp_cache,
+            past_key_values=seco_cache,
             shift_label=False,
             is_reduce=False)
         loss = outputs['loss'].sum() / valid_label_count
-        tmp_cache.index(i).copy_grad(gd=seco_cache.index(i).grad)
+        seco_cache.link_grad(tmp_cache, i)
         _backward(loss, model)
+        seco_cache.delete(i)
+        del tmp_cache
 
     inputs_embeds.register_hook(partial(
         _set_to_incomming_grad, 
@@ -108,126 +110,6 @@ def _seco(self, model, inputs):
     _step(model, self.optimizer)
 
     return accum_loss / self.args.gradient_accumulation_steps
-
-
-# def _seco2(self, model, inputs):
-#     fwd_chunk_size = 512
-#     bwd_chunk_size = 512
-#     valid_label_count = (inputs['labels'] != -100).sum()
-
-#     # prepare inputs
-#     attention_mask, inputs_embeds, labels, _ = _prepare_inputs(model, inputs)
-
-#     # align length across gpus
-#     inputs_embeds, labels, attention_mask, _ = _maybe_align_length_across_gpus(
-#         inputs_embeds, 
-#         labels, 
-#         attention_mask,
-#         None)
-
-#     inputs_embeds_detach = inputs_embeds.detach()
-#     inputs_embeds_detach.requires_grad_(True)
-#     labels = torch.cat((labels[:, 1:], torch.full_like(labels[:, :1], fill_value=-100)), dim=-1)
-
-#     # chunkize inputs
-#     inputs_embeds_list, labels_list, masks_list = _chunkize_inputs(
-#         [inputs_embeds_detach, labels, attention_mask],
-#         chunk_size=fwd_chunk_size)
-    
-#     torch.cuda.memory._record_memory_history()
-    
-#     # LLM forward prop
-#     seco_cache = _first_forward_prop_seco2(
-#         model, 
-#         inputs_embeds_list, 
-#         masks_list)
-
-#     # maybe change chunk size before backward prop
-#     if fwd_chunk_size != bwd_chunk_size:
-#         seco_cache.reorganize(bwd_chunk_size)
-#         inputs_embeds_list, labels_list, masks_list = _chunkize_inputs(
-#             [inputs_embeds_detach, labels, attention_mask],
-#             chunk_size=bwd_chunk_size,)
-
-#     # LLM backward prop
-#     generator = reversed(list(enumerate(zip(inputs_embeds_list, labels_list))))
-#     grads = []
-#     accum_loss = 0
-
-#     for i, (chunk_embeds, chunk_labels) in generator:
-#         tmp_cache = seco_cache.range(i)
-#         chunk_mask = torch.cat(masks_list[:i+1], dim=1)
-
-#         # forward propagation
-#         with torch.no_grad():
-#             checkpoints = model(
-#                 attention_mask=chunk_mask,
-#                 inputs_embeds=chunk_embeds,
-#                 labels=chunk_labels,
-#                 past_key_values=tmp_cache,
-#                 gather_ckpt=True,
-#                 shift_label=False)
-            
-#         tmp_cache = seco_cache.range(i)
-
-#         # backward propagation
-#         loss, grad = model(
-#             inputs_embeds=chunk_embeds,
-#             attention_mask=chunk_mask,
-#             labels=chunk_labels,
-#             past_key_values=tmp_cache,
-#             backward=partial(_backward, model=model),
-#             checkpoints=checkpoints,
-#             valid_label_count=valid_label_count)
-
-#         grads.append(grad)
-#         accum_loss += loss.item()
-
-#     torch.cuda.memory._dump_snapshot("llm-fwd-bwd-512-1.pickle")
-
-#     grads = list(reversed(grads))
-#     grads = torch.cat(grads, dim=1)
-
-#     inputs_embeds.register_hook(partial(_set_to_incomming_grad, incomming_grad=grads))
-#     _backward(inputs_embeds.sum(), model)
-#     _step(model, self.optimizer)
-
-#     return loss / self.args.gradient_accumulation_steps
-
-
-# def _ckpt_2d(self, model, inputs):
-#     # prepare inputs
-#     attention_mask, inputs_embeds, labels, _ = _prepare_inputs(model, inputs)
-#     origin_seq_len = inputs_embeds.shape[-2]
-
-#     # align length across gpus
-#     inputs_embeds, labels, attention_mask, _ = _maybe_align_length_across_gpus(
-#         inputs_embeds, 
-#         labels, 
-#         attention_mask,
-#         None)
-
-#     inputs_embeds_detach = inputs_embeds.detach()
-#     inputs_embeds_detach.requires_grad_(True)
-#     labels = torch.cat((labels[:, 1:], torch.full_like(labels[:, :1], fill_value=-100)), dim=-1)
-
-#     checkpoints = model(
-#         inputs_embeds=inputs_embeds_detach,
-#         labels=labels,
-#         shift_labels=True)
-    
-#     loss, grad = model(
-#         inputs_embeds=inputs_embeds,
-#         attention_mask=attention_mask,
-#         labels=labels,
-#         backward=partial(_backward, model=model),
-#         checkpoints=checkpoints)
-    
-#     inputs_embeds.register_hook(partial(_set_to_incomming_grad, incomming_grad=grad))
-#     _backward(inputs_embeds.sum(), model)
-#     _step(model, self.optimizer)
-
-#     return loss / self.args.gradient_accumulation_steps
 
 
 def _spaco2(self, model, inputs):
@@ -269,7 +151,6 @@ def _spaco2(self, model, inputs):
         bwd_chunk_size)
     
     # reorganize inputs
-    seco_cache.reorganize(1_000_000)
     embeds_list, labels_list, position_list, indices_list = _chunkize_inputs(
         (inputs_embeds_detach, labels, position_ids, sparse_indices),
         chunk_size=bwd_chunk_size)
@@ -611,9 +492,6 @@ def _profile_seco(self, model, inputs):
     t4 = WallTime("backward prop", gpu_device)
     t5 = WallTime("vision tower bwd", gpu_device)
 
-    # t6 = WallTime("cpu-offload", gpu_device)
-    # t7 = WallTime("cuda-restore", gpu_device)
-
     while inputs['input_ids'].shape[-1] < context_length:
         inputs['input_ids'] = torch.cat([inputs['input_ids'], torch.full_like(inputs['input_ids'], fill_value=self.tokenizer.pad_token_id)], dim=-1)
         inputs['labels'] = torch.cat([inputs['labels'], torch.full_like(inputs['labels'], fill_value=-100)], dim=-1)
@@ -644,7 +522,6 @@ def _profile_seco(self, model, inputs):
                 chunk_size=fwd_chunk_size)
 
             with t2:
-                # LLM forward prop
                 accum_loss, seco_cache = _first_forward_prop_seco(
                     model, 
                     inputs_embeds_list, 
@@ -658,16 +535,14 @@ def _profile_seco(self, model, inputs):
                     seco_cache.reorganize(bwd_chunk_size)
                     inputs_embeds_list, labels_list, masks_list = _chunkize_inputs(
                         [inputs_embeds_detach, labels, attention_mask],
-                        chunk_size=bwd_chunk_size,)
+                        chunk_size=bwd_chunk_size)
 
             with t4:
-                # LLM backward prop
                 generator = reversed(list(enumerate(zip(inputs_embeds_list, labels_list))))
                 for i, (chunk_embeds, chunk_labels) in generator:
-                    tmp_cache = seco_cache.index(i)
-
-                    # reconstruct chunk graph
-                    seco_cache.delete(i)
+                    
+                    # reconstruction
+                    seco_cache.pre_reconstruction(i)
                     outputs = model(
                         input_ids=None,
                         attention_mask=torch.cat(masks_list[:i+1], dim=1),
@@ -678,11 +553,10 @@ def _profile_seco(self, model, inputs):
                         is_reduce=False)
                     loss = outputs['loss'].sum() / valid_label_count
 
-                    # backprop through reconstructed graph
-                    seco_cache.link_grad(tmp_cache, i)
-                    _backward(loss, model)
-                    seco_cache.delete(i)
-                    del tmp_cache
+                    # backward propagation
+                    seco_cache.pre_backward(i)
+                    _backward(loss, model) 
+                    seco_cache.after_backward()
 
             with t5:
                 inputs_embeds.register_hook(partial(
@@ -709,27 +583,11 @@ def _profile_seco(self, model, inputs):
         param_memory = f"{param_count * 2 / 1024 ** 3: .1f}"
         grad_memory = f"{grad_count * 2 / 1024 ** 3: .1f}"
 
-        kv_cache_count = 0
-        for x in seco_cache.k_cache:
-            for y in x:
-                if y.device != torch.device('cpu'):
-                    kv_cache_count += y.numel()
-                if y.grad is not None and y.grad.device != torch.device('cpu'):
-                    kv_cache_count += y.grad.numel()
-        for x in seco_cache.v_cache:
-            for y in x:
-                if y.device != torch.device('cpu'):
-                    kv_cache_count += y.numel()
-                if y.grad is not None and y.grad.device != torch.device('cpu'):
-                    kv_cache_count += y.grad.numel()
-        kv_cache_memory = f"{kv_cache_count * 2 / 1024 ** 3: .1f}"
-
         memory_info = {
             "cur mem alloc": f"{torch.cuda.memory_allocated(gpu_device) / 1024 ** 3: .1f}",
             "max mem alloc": f"{torch.cuda.max_memory_allocated(gpu_device) / 1024 ** 3: .1f}",
             "parameters": param_memory,
-            "gradients": grad_memory,
-            "kv cache mem": kv_cache_memory
+            "gradients": grad_memory
         }
         print('=' * 10)
 

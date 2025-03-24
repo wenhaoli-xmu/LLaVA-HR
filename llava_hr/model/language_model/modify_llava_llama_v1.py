@@ -410,8 +410,7 @@ def model_forward(
             
             # =====================================================================
             if past_key_values is not None and past_key_values.length(idx) > 0:
-                past_key_tensor = torch.cat(past_key_values.k_cache[idx], dim=-2)
-                past_value_tensor = torch.cat(past_key_values.v_cache[idx], dim=-2)
+                past_key_tensor, past_value_tensor = past_key_values.gather(idx)
             else:
                 past_key_tensor = None
                 past_value_tensor = None
@@ -428,7 +427,7 @@ def model_forward(
                 past_value_tensor,
                 image_masks,
                 use_reentrant=False)
-            
+
             if past_key_values is not None:
                 past_key_values.update(idx, new_key_states, new_value_states)
 
