@@ -28,3 +28,5 @@ ckpts*
 
 .ipynb_checkpoints
 *.ipynb
+
+!zero*.json
