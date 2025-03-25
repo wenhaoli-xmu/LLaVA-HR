@@ -14,6 +14,7 @@ from transformers.models.llama.modeling_llama import (
 
 from chunkoptim.utils import SecoCache
 from llava_hr.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from flash_attn import flash_attn_func
 
 
 def find_boundaries(mask):
@@ -293,7 +294,9 @@ def causal_forward(
         loss = torch.nn.functional.cross_entropy(shift_logits, shift_labels, reduce=is_reduce)
         # ====================================================================================
 
-    return CausalLMOutputWithPast(loss=loss)
+    return CausalLMOutputWithPast(
+        loss=loss, 
+        attentions=outputs.attentions)
 
 
 def model_forward(
@@ -387,7 +390,10 @@ def model_forward(
 
     # decoder layers
     all_hidden_states = () if output_hidden_states else None
-    all_self_attns = None
+
+    cond1 = output_attentions  is False
+    cond2 = torch.is_grad_enabled()
+    all_self_attns = None if cond1 or cond2 else list()
 
     for idx, decoder_layer in enumerate(self.layers):
         if output_hidden_states:
@@ -398,7 +404,7 @@ def model_forward(
 
             def create_custom_forward(module):
                 def custom_forward(*inputs):
-                    return module(*inputs, idx)
+                    return module(*inputs, idx, output_attentions)
                 return custom_forward
             
             """
@@ -417,7 +423,7 @@ def model_forward(
             # =====================================================================
 
             # there is no neccessary to update kv_cache values in backward prop
-            hidden_states, new_key_states, new_value_states = torch.utils.checkpoint.checkpoint(
+            hidden_states, new_key_states, new_value_states, _ = torch.utils.checkpoint.checkpoint(
                 create_custom_forward(decoder_layer),
                 hidden_states,
                 attention_mask,
@@ -433,7 +439,7 @@ def model_forward(
 
         # for forward prop
         else:
-            hidden_states, _, _ = decoder_layer(
+            hidden_states, _, _, attention = decoder_layer(
                 hidden_states,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
@@ -441,7 +447,9 @@ def model_forward(
                 past_key_tensor=None,
                 past_value_tensor=None,
                 image_masks=image_masks,
-                layer_idx=idx)
+                layer_idx=idx,
+                output_attentions=output_attentions)
+            all_self_attns.append(attention)
             
         torch.cuda.empty_cache()
 
@@ -472,6 +480,7 @@ def layer_forward(
     past_value_tensor: Optional[torch.Tensor] = None,
     image_masks: Optional[List[List[int]]] = None,
     layer_idx: Optional[int] = None,
+    output_attentions: bool = False,
 ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
     """
     Args:
@@ -494,7 +503,7 @@ def layer_forward(
     hidden_states = self.input_layernorm(hidden_states)
 
     # Self Attention
-    hidden_states, new_key_states, new_value_states = self.self_attn(
+    hidden_states, new_key_states, new_value_states, attention = self.self_attn(
         hidden_states=hidden_states,
         attention_mask=attention_mask,
         position_ids=position_ids,
@@ -502,7 +511,8 @@ def layer_forward(
         past_key_tensor=past_key_tensor,
         past_value_tensor=past_value_tensor,
         image_masks=image_masks,
-        layer_idx=layer_idx
+        layer_idx=layer_idx,
+        output_attentions=output_attentions
     )
     hidden_states = residual + hidden_states
 
@@ -512,7 +522,7 @@ def layer_forward(
     hidden_states = self.mlp(hidden_states)
     hidden_states = residual + hidden_states
 
-    return hidden_states, new_key_states, new_value_states
+    return hidden_states, new_key_states, new_value_states, attention
 
 
 def generate_mask(num_query, num_kv, dtype, device):
@@ -567,7 +577,8 @@ def attn_forward(
     past_key_tensor: Optional[torch.Tensor] = None,
     past_value_tensor: Optional[torch.Tensor] = None,
     image_masks: Optional[List[List[int]]] = None,
-    layer_idx: Optional[int] = None
+    layer_idx: Optional[int] = None,
+    output_attentions: bool = False,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
 
     bsz, q_len, _ = hidden_states.size()
@@ -625,6 +636,7 @@ def attn_forward(
     value_states = repeat_kv(value_states, self.num_key_value_groups)
 
     # =================================================================
+    attention = query_states @ key_states.transpose(-1,-2)
     if hidden_states.dtype == torch.float64:
         attn_output = float64_attention(
             q=query_states.transpose(-2,-3),
@@ -650,4 +662,4 @@ def attn_forward(
     else:
         attn_output = self.o_proj(attn_output)
 
-    return attn_output, new_key_states, new_value_states
+    return attn_output, new_key_states, new_value_states, attention

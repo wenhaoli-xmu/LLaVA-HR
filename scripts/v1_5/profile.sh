@@ -5,26 +5,44 @@ MASTER_ADDR=`scontrol show hostname $SLURM_JOB_NODELIST | head -n1`
 MASTER_PORT=$((RANDOM % 101 + 20000))
 
 
-srun -p INTERN2 --job-name=03051200 --nodes=1 --gres=gpu:1 --ntasks=1 --cpus-per-task=12 --quotatype=reserved --kill-on-bad-exit=1 python llava_hr/train/train_mem.py \
+function makehostfile() {
+    > hostfile
+    slots=8
+    nodes=$(scontrol show hostnames $SLURM_JOB_NODELIST)
+    for node in $nodes; do
+        echo "$node slots=$slots" >> hostfile
+    done
+}
+makehostfile
+
+
+deepspeed \
+    --launcher SLURM \
+    --master_addr=${MASTER_ADDR} \
+    --master_port=${MASTER_PORT} \
+    --hostfile='hostfile' \
+    --no_ssh_check \
+    llava_hr/train/train_mem.py \
+    --deepspeed ./scripts/zero2.json \
     --model_name_or_path unsloth/llama-3-8b-Instruct \
-    --version llama \
+    --version llama3 \
     --data_path playground/data/llava_v1_5_mix665k.json \
     --image_folder playground/data \
     --vision_tower openai/clip-vit-large-patch14-336 \
     --vision_tower_slow convnext_large_mlp.clip_laion2b_ft_320 \
+    --pretrain_mm_mlp_adapter checkpoints/pretrain-8b/mm_projector.bin \
     --mm_projector_type mlp2x_gelu \
     --mm_vision_select_layer -2 \
-    --pretrain_mm_mlp_adapter ./checkpoints/pretrain-8b/mm_projector.bin \
     --mm_use_im_start_end False \
     --mm_use_im_patch_token False \
     --image_aspect_ratio pad \
     --group_by_modality_length True \
     --bf16 True \
-    --output_dir ./checkpoints/debug \
+    --output_dir checkpoints/profile \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 1 \
-    --per_device_eval_batch_size 1 \
-    --gradient_accumulation_steps 1 \
+    --per_device_train_batch_size 8 \
+    --per_device_eval_batch_size 4 \
+    --gradient_accumulation_steps 2 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
     --save_steps 50000 \
@@ -43,4 +61,6 @@ srun -p INTERN2 --job-name=03051200 --nodes=1 --gres=gpu:1 --ntasks=1 --cpus-per
     --is_multipath_encoder True \
     --freeze_vision False \
     --input_image_size 1024 \
-    --modify v1-spaco2
+    --modify v1-profile-spaco2
+
+# bash scripts/v1_5/eval.sh ./checkpoints/llava-hr-7b-sft-1024 2>&1 | tee log-llava-hr-7b-sft-1024.txt
