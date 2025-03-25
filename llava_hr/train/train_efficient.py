@@ -383,16 +383,25 @@ def _profile_parallel(self, model, inputs):
     from pygments.console import colorize
     from profiler import WallTime
 
+    context_length = 2048
+    valid_label_count = (inputs['labels'] != -100).sum()
+
     if dist.is_initialized():
         gpu_device = dist.get_rank()
     else:
         gpu_device = 0
     
     t0 = WallTime("end to end time", gpu_device)
-    t1 = WallTime("total forward", gpu_device)
-    t2 = WallTime("total backward", gpu_device)
+    t1 = WallTime("vision tower fwd", gpu_device)
+    t2 = WallTime("forward prop", gpu_device)
 
-    valid_label_count = (inputs['labels'] != -100).sum()
+    while inputs['input_ids'].shape[-1] < context_length:
+        inputs['input_ids'] = torch.cat([inputs['input_ids'], torch.full_like(inputs['input_ids'], fill_value=self.tokenizer.pad_token_id)], dim=-1)
+        inputs['labels'] = torch.cat([inputs['labels'], torch.full_like(inputs['labels'], fill_value=-100)], dim=-1)
+        inputs['attention_mask'] = torch.cat([inputs['attention_mask'], torch.full_like(inputs['attention_mask'], fill_value=0)], dim=-1)
+    inputs['input_ids'] = inputs['input_ids'][:, :context_length]
+    inputs['labels'] = inputs['labels'][:, :context_length]
+    inputs['attention_mask'] = inputs['attention_mask'][:, :context_length]
 
     for _ in range(3):
         with t0:
@@ -447,18 +456,11 @@ def _profile_parallel(self, model, inputs):
         param_memory = f"{param_count * 2 / 1024 ** 3: .1f}"
         grad_memory = f"{grad_count * 2 / 1024 ** 3: .1f}"
 
-        kv_cache_count = 0
-        for x in seco_cache.k_cache:
-            for y in x:
-                kv_cache_count += y.numel()
-        kv_cache_memory = f"{kv_cache_count * 8 / 1024 ** 3: .1f}"
-
         memory_info = {
             "cur mem alloc": f"{torch.cuda.memory_allocated(gpu_device) / 1024 ** 3: .1f}",
             "max mem alloc": f"{torch.cuda.max_memory_allocated(gpu_device) / 1024 ** 3: .1f}",
             "parameters": param_memory,
-            "gradients": grad_memory,
-            "kv cache mem": kv_cache_memory
+            "gradients": grad_memory
         }
         print('=' * 10)
 
@@ -749,6 +751,7 @@ def _profile_spaco2(self, model, inputs):
     bwd_chunk_size = 512
     chunk_budget = 1
 
+    context_length = 2048
     valid_label_count = (inputs['labels'] != -100).sum()
 
     if dist.is_initialized():
@@ -762,6 +765,14 @@ def _profile_spaco2(self, model, inputs):
     t3 = WallTime("reorganize time", gpu_device)
     t4 = WallTime("backward prop", gpu_device)
     t5 = WallTime("vision tower bwd", gpu_device)
+
+    while inputs['input_ids'].shape[-1] < context_length:
+        inputs['input_ids'] = torch.cat([inputs['input_ids'], torch.full_like(inputs['input_ids'], fill_value=self.tokenizer.pad_token_id)], dim=-1)
+        inputs['labels'] = torch.cat([inputs['labels'], torch.full_like(inputs['labels'], fill_value=-100)], dim=-1)
+        inputs['attention_mask'] = torch.cat([inputs['attention_mask'], torch.full_like(inputs['attention_mask'], fill_value=0)], dim=-1)
+    inputs['input_ids'] = inputs['input_ids'][:, :context_length]
+    inputs['labels'] = inputs['labels'][:, :context_length]
+    inputs['attention_mask'] = inputs['attention_mask'][:, :context_length]
 
     for _ in range(3):
 
