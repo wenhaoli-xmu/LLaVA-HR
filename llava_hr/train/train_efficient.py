@@ -146,7 +146,7 @@ def visualize(inputs, attns):
 def _spaco2(self, model, inputs):
 
     fwd_chunk_size = 512
-    bwd_chunk_size = 512
+    bwd_chunk_size = 384
     chunk_budget = 1
 
     valid_label_count = (inputs['labels'] != -100).sum()
@@ -821,7 +821,7 @@ def _profile_spaco2(self, model, inputs):
 
             with t1:
                 # prepare inputs
-                attention_mask, inputs_embeds, labels, image_masks = _prepare_inputs(model, inputs)
+                attention_mask, inputs_embeds, labels, image_masks, attns = _prepare_inputs(model, inputs)
 
             # construct labels and 4d attention mask
             labels = torch.cat((labels[:, 1:], torch.full_like(labels[:, :1], fill_value=-100)), dim=-1)
@@ -838,13 +838,14 @@ def _profile_spaco2(self, model, inputs):
 
             with t2:
                 # LLM forward prop
-                accum_loss, seco_cache, attentions = _first_forward_prop_seco(
+                raw_loss, seco_cache = _first_forward_prop_seco(
                     model, 
                     embeds_list, 
                     labels_list, 
                     mask_4d, 
                     valid_label_count,
-                    output_attentions=True)
+                    return_raw_loss=True)
+                accum_loss = raw_loss.sum() / valid_label_count
             
             with t3:
                 inputs_embeds_detach, labels, position_ids, sparse_indices = _sample_tokens_v2(
@@ -854,7 +855,8 @@ def _profile_spaco2(self, model, inputs):
                     image_masks,
                     chunk_budget,
                     bwd_chunk_size,
-                    attentions)
+                    attns,
+                    raw_loss)
                 
                 # reorganize inputs
                 seco_cache.squeeze()
@@ -872,6 +874,7 @@ def _profile_spaco2(self, model, inputs):
                 # LLM backward prop
                 neg_inf = torch.finfo(mask_4d.dtype).min
                 generator = reversed(list(enumerate(zip(embeds_list, labels_list, position_list, indices_list))))
+                assert len(generator) == 1
                 for i, (chunk_embeds, chunk_labels, chunk_position, chunk_indices) in generator:
                     
                     # reconstruct input attention mask
