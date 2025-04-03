@@ -62,6 +62,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
 
         if 'v0' in modify_version:
             from .modify_llava_llama_v0 import (
+                encode_images,
                 prepare_inputs_labels_for_multimodal,
                 causal_forward,
                 model_forward,
@@ -69,20 +70,15 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
                 attn_forward)
         elif 'v1' in modify_version:
             from .modify_llava_llama_v1 import (
+                encode_images,
                 prepare_inputs_labels_for_multimodal,
                 causal_forward,
                 model_forward,
                 layer_forward,
                 attn_forward)
-        elif 'v2' in modify_version:
-            from .modify_llava_llama_v2 import (
-                prepare_inputs_labels_for_multimodal,
-                causal_forward,
-                model_forward,
-                layer_forward,
-                attn_forward,)
         else: raise NotImplementedError(modify_version)
 
+        self.encode_images = types.MethodType(encode_images, self)
         self.prepare_inputs_labels_for_multimodal = types.MethodType(
             prepare_inputs_labels_for_multimodal, self)
         self.forward = types.MethodType(causal_forward, self)

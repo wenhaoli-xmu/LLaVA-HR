@@ -30,6 +30,12 @@ def find_boundaries(mask):
     return boundaries
 
 
+def encode_images(self, images):
+    image_features, attns = self.get_model().get_vision_tower()(images)
+    image_features = self.get_model().mm_projector(image_features)
+    return image_features, attns
+
+
 def prepare_inputs_labels_for_multimodal(
     self, input_ids, attention_mask, past_key_values, labels, images
 ):
@@ -42,12 +48,18 @@ def prepare_inputs_labels_for_multimodal(
 
     if type(images) is list or images.ndim == 5:
         concat_images = torch.cat([image for image in images], dim=0)
-        image_features = self.encode_images(concat_images)
+
+        # =======================================================
+        image_features, attns = self.encode_images(concat_images)
+        # =======================================================
+
         split_sizes = [image.shape[0] for image in images]
         image_features = torch.split(image_features, split_sizes, dim=0)
         image_features = [x.flatten(0, 1) for x in image_features]
     else:
-        image_features = self.encode_images(images)
+        # ================================================
+        image_features, attns = self.encode_images(images)
+        # ================================================
 
     new_input_embeds = []
     new_labels = [] if labels is not None else None
@@ -210,7 +222,7 @@ def prepare_inputs_labels_for_multimodal(
 
     # =============================================================================================
     new_image_mask = torch.tensor(new_image_mask, dtype=torch.bool, device=new_input_embeds.device)
-    return None, attention_mask, past_key_values, new_input_embeds, new_labels, new_image_mask
+    return None, attention_mask, past_key_values, new_input_embeds, new_labels, new_image_mask, attns
     # =============================================================================================
 
 
@@ -245,7 +257,8 @@ def causal_forward(
             past_key_values, 
             inputs_embeds, 
             labels, 
-            image_masks
+            image_masks,
+            _
         ) = self.prepare_inputs_labels_for_multimodal(
             input_ids, 
             attention_mask, 
@@ -294,9 +307,7 @@ def causal_forward(
         loss = torch.nn.functional.cross_entropy(shift_logits, shift_labels, reduce=is_reduce)
         # ====================================================================================
 
-    return CausalLMOutputWithPast(
-        loss=loss, 
-        attentions=outputs.attentions)
+    return CausalLMOutputWithPast(loss=loss)
 
 
 def model_forward(
@@ -390,10 +401,7 @@ def model_forward(
 
     # decoder layers
     all_hidden_states = () if output_hidden_states else None
-
-    cond1 = output_attentions  is False
-    cond2 = torch.is_grad_enabled()
-    all_self_attns = None if cond1 or cond2 else list()
+    all_self_attns = []
 
     for idx, decoder_layer in enumerate(self.layers):
         if output_hidden_states:
@@ -423,7 +431,7 @@ def model_forward(
             # =====================================================================
 
             # there is no neccessary to update kv_cache values in backward prop
-            hidden_states, new_key_states, new_value_states, _ = torch.utils.checkpoint.checkpoint(
+            hidden_states, new_key_states, new_value_states = torch.utils.checkpoint.checkpoint(
                 create_custom_forward(decoder_layer),
                 hidden_states,
                 attention_mask,
@@ -439,7 +447,7 @@ def model_forward(
 
         # for forward prop
         else:
-            hidden_states, _, _, attention = decoder_layer(
+            hidden_states, _, _ = decoder_layer(
                 hidden_states,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
@@ -447,9 +455,7 @@ def model_forward(
                 past_key_tensor=None,
                 past_value_tensor=None,
                 image_masks=image_masks,
-                layer_idx=idx,
-                output_attentions=output_attentions)
-            all_self_attns.append(attention)
+                layer_idx=idx)
             
         torch.cuda.empty_cache()
 
@@ -466,7 +472,6 @@ def model_forward(
         last_hidden_state=hidden_states,
         past_key_values=past_key_values,
         hidden_states=all_hidden_states,
-        attentions=all_self_attns
     )
 
 
@@ -503,7 +508,7 @@ def layer_forward(
     hidden_states = self.input_layernorm(hidden_states)
 
     # Self Attention
-    hidden_states, new_key_states, new_value_states, attention = self.self_attn(
+    hidden_states, new_key_states, new_value_states = self.self_attn(
         hidden_states=hidden_states,
         attention_mask=attention_mask,
         position_ids=position_ids,
@@ -512,7 +517,6 @@ def layer_forward(
         past_value_tensor=past_value_tensor,
         image_masks=image_masks,
         layer_idx=layer_idx,
-        output_attentions=output_attentions
     )
     hidden_states = residual + hidden_states
 
@@ -522,7 +526,7 @@ def layer_forward(
     hidden_states = self.mlp(hidden_states)
     hidden_states = residual + hidden_states
 
-    return hidden_states, new_key_states, new_value_states, attention
+    return hidden_states, new_key_states, new_value_states
 
 
 def generate_mask(num_query, num_kv, dtype, device):
@@ -577,8 +581,7 @@ def attn_forward(
     past_key_tensor: Optional[torch.Tensor] = None,
     past_value_tensor: Optional[torch.Tensor] = None,
     image_masks: Optional[List[List[int]]] = None,
-    layer_idx: Optional[int] = None,
-    output_attentions: bool = False,
+    layer_idx: Optional[int] = None
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
 
     bsz, q_len, _ = hidden_states.size()
@@ -636,7 +639,6 @@ def attn_forward(
     value_states = repeat_kv(value_states, self.num_key_value_groups)
 
     # =================================================================
-    attention = query_states @ key_states.transpose(-1,-2)
     if hidden_states.dtype == torch.float64:
         attn_output = float64_attention(
             q=query_states.transpose(-2,-3),
@@ -662,4 +664,4 @@ def attn_forward(
     else:
         attn_output = self.o_proj(attn_output)
 
-    return attn_output, new_key_states, new_value_states, attention
+    return attn_output, new_key_states, new_value_states

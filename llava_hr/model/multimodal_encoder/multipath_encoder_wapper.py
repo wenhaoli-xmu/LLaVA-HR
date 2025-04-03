@@ -171,10 +171,15 @@ class MultiPathCLIPVisionTower(nn.Module):
         x = slow_blk[2](x)
         x = slow_blk[3](x)
 
+        # =================================================================
+        bsz, seq_len = y.shape[:2]
+        attns = torch.zeros((bsz, seq_len), device=y.device, dtype=y.dtype)
+        # =================================================================
+
         # inference of fast branch
         for blk in fast_blk[:n_blks]:
             if self.training:
-                y=checkpoint(
+                y = checkpoint(
                     blk.__call__,
                     y,
                     None,
@@ -182,12 +187,13 @@ class MultiPathCLIPVisionTower(nn.Module):
                 )[0]
             else:
                 y = blk(y, None, None)[0]
+
         if self.enable_adapter:
             y = self.align_stages_latent[0](y, x)
 
         for blk in fast_blk[n_blks:2 * n_blks]:
             if self.training:
-                y=checkpoint(
+                y = checkpoint(
                     blk.__call__,
                     y,
                     None,
@@ -195,24 +201,33 @@ class MultiPathCLIPVisionTower(nn.Module):
                 )[0]
             else:
                 y = blk(y, None, None)[0]
-
+            
         if self.enable_adapter:
             y = self.align_stages_latent[1](y, x)
+
         for blk in fast_blk[2 * n_blks:3 * n_blks]:
             if self.training:
-                y=checkpoint(
+                y, attn = checkpoint(
                     blk.__call__,
                     y,
                     None,
-                    None
-                )[0]
+                    None,
+                    True
+                )
             else:
-                y = blk(y, None, None)[0]
+                y, attn = blk(y, None, None, True)
+
+            # =================================
+            attn = attn.detach().mean(1).sum(1)
+            attns += attn
+            # =================================
+
         if self.enable_adapter:
             y = self.align_stages_latent[2](y, x)
+
         for blk in fast_blk[3 * n_blks:]:
             if self.training:
-                y=checkpoint(
+                y = checkpoint(
                     blk.__call__,
                     y,
                     None,
@@ -224,7 +239,7 @@ class MultiPathCLIPVisionTower(nn.Module):
         #features combination
         y = self.align_stages[0](y, x)
 
-        return y
+        return y, attns
 
     def forward_features(self, x):
         assert  NotImplementedError

@@ -6,11 +6,11 @@ from functools import partial
 from .utils import (
     _set_to_incomming_grad,
     _backward,
-    _maybe_align_length_across_gpus,
+    # _maybe_align_length_across_gpus,
     _first_forward_prop_seco,
     _chunkize_inputs,
     _prepare_inputs,
-    _sample_chunks,
+    # _sample_chunks,
     _step,
     _construct_4d_mask,
     _sample_tokens_v2
@@ -112,7 +112,39 @@ def _seco(self, model, inputs):
     return accum_loss / self.args.gradient_accumulation_steps
 
 
+def visualize(inputs, attns):
+    import numpy as np
+    import matplotlib.pyplot as plt
+    for t, (image, attn) in enumerate(zip(inputs['images'], attns)):
+        image = (image - image.min()) / (image.max() - image.min())
+        image = torch.clip(image, min=0, max=1)
+        image_array = image.permute(1, 2, 0).cpu().float().numpy()
+        block_size = 32
+        height, width = image_array.shape[:2]
+        fig, _ = plt.subplots(figsize=(10, 10))
+        for idx, sp in enumerate([0.25, 0.167, 0.1]):
+            ax = fig.add_subplot(int(f"13{idx+1}"))
+            scores = torch.zeros_like(attn)
+            topk_indices = torch.topk(attn, k=int(attn.numel() * sp)).indices
+            scores[topk_indices] = 1
+            scores = scores.unflatten(0, (block_size, block_size))
+            scores = scores.cpu().float().numpy()
+            num_blocks_height = height // block_size
+            num_blocks_width = width // block_size
+            mask = np.zeros((height, width, 4))
+            for i in range(num_blocks_height):
+                for j in range(num_blocks_width):
+                    color = [1.0, 0.0, 0.0, 0.5] if scores[i, j] > 0.5 else [0.0, 1.0, 0.0, 0.5]
+                    mask[i*block_size:(i+1)*block_size, j*block_size:(j+1)*block_size] = color
+            ax.imshow(image_array)
+            ax.imshow(mask, alpha=mask[:, :, 3])
+        plt.axis('off')
+        plt.savefig(f"output_image_with_mask_{t}.png", bbox_inches='tight', pad_inches=0)
+        plt.show()
+
+
 def _spaco2(self, model, inputs):
+
     fwd_chunk_size = 512
     bwd_chunk_size = 512
     chunk_budget = 1
@@ -120,7 +152,14 @@ def _spaco2(self, model, inputs):
     valid_label_count = (inputs['labels'] != -100).sum()
 
     # prepare inputs
-    attention_mask, inputs_embeds, labels, image_masks = _prepare_inputs(model, inputs)
+    attention_mask, inputs_embeds, labels, image_masks, attns = _prepare_inputs(model, inputs)
+
+    if False:
+        visualize(inputs, attns)
+        if dist.get_rank() == 0:
+            import IPython
+            IPython.embed() 
+        dist.barrier()
 
     # construct labels and 4d attention mask
     labels = torch.cat((labels[:, 1:], torch.full_like(labels[:, :1], fill_value=-100)), dim=-1)
@@ -135,13 +174,14 @@ def _spaco2(self, model, inputs):
         chunk_size=fwd_chunk_size)
 
     # LLM forward prop
-    accum_loss, seco_cache, attentions = _first_forward_prop_seco(
+    raw_loss, seco_cache = _first_forward_prop_seco(
         model, 
         embeds_list, 
         labels_list, 
         mask_4d, 
         valid_label_count,
-        output_attentions=True)
+        return_raw_loss=True)
+    accum_loss = raw_loss.sum() / valid_label_count
     
     inputs_embeds_detach, labels, position_ids, sparse_indices = _sample_tokens_v2(
         inputs_embeds, 
@@ -150,7 +190,8 @@ def _spaco2(self, model, inputs):
         image_masks,
         chunk_budget,
         bwd_chunk_size,
-        attentions)
+        attns,
+        raw_loss)
     
     seco_cache.squeeze()
     embeds_list, labels_list, position_list, indices_list = _chunkize_inputs(
@@ -481,7 +522,7 @@ def _profile_seco(self, model, inputs):
 
     fwd_chunk_size = 512
     bwd_chunk_size = 512
-    context_length = 6144
+    context_length = 3072
     valid_label_count = (inputs['labels'] != -100).sum()
 
     if dist.is_initialized():
@@ -532,7 +573,7 @@ def _profile_seco(self, model, inputs):
                     labels_list, 
                     masks_list, 
                     valid_label_count,
-                    cpu_offload=2)
+                    cpu_offload=1)
 
             with t3:
                 if fwd_chunk_size != bwd_chunk_size:
