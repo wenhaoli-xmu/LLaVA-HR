@@ -9,6 +9,9 @@ from transformers.models.llama.modeling_llama import (
     _expand_mask)
 
 
+from transformers import Trainer
+
+
 def _construct_4d_mask(attention_mask, dtype, device):
     bsz, seq_len = attention_mask.shape
     mask = _make_causal_mask(
@@ -113,30 +116,50 @@ def _prepare_inputs(model, inputs, no_grad=False):
 
 
 @torch.no_grad()
-def _sample_tokens_v2(inputs_embeds, labels, attention_mask, image_masks, chunk_budget, bwd_chunk_size, attns, raw_loss):
+def _sample_tokens_v2(inputs_embeds, labels, attention_mask, image_masks, chunk_budget, bwd_chunk_size, attns):
     text_masks = attention_mask.clone()
     text_masks[image_masks] = False
     indices = []
-    valid_length = []
+    sparse_labels = []
 
     TEXT_RATIO_MAX = 0.5
 
     text_budget = int(bwd_chunk_size * chunk_budget * TEXT_RATIO_MAX)
 
-    for text_mask, image_mask, attn, rloss in zip(text_masks, image_masks, attns, raw_loss):
+    for text_mask, image_mask, attn, label in zip(text_masks, image_masks, attns, labels):
         full_ids = torch.arange(text_masks.shape[1], device='cuda')
         text_ids = full_ids[text_mask]
         image_ids = full_ids[image_mask]
+        valid_label_mask = label != -100
 
-        nonzero_selector = rloss[text_ids] > 0
-        text_ids = text_ids[nonzero_selector]
+        # nonzero_selector = label[text_ids] > 0
+        # text_ids = text_ids[nonzero_selector]
 
         """这里假设给text_ids分配所有budget的一半"""
         if text_ids.numel() < text_budget:
             select_ids = text_ids
         else:
-            topk_selector = torch.topk(rloss[text_ids], k=text_budget).indices
-            select_ids = text_ids[topk_selector]
+            arange = torch.arange(label.numel(), device=label.device)
+            valid_label_ids = arange[valid_label_mask]
+
+            if valid_label_ids.numel() > text_budget:
+                selector = torch.randperm(valid_label_ids.numel())[:text_budget]
+                select_ids = valid_label_ids[selector]
+            else:
+                select_ids = valid_label_ids
+
+            remain_budget = text_budget - select_ids.numel()
+            if remain_budget > 0:
+                is_text_mask = torch.zeros_like(valid_label_mask).scatter_(dim=-1, index=text_ids, value=True)
+                valid_ids = arange[~valid_label_mask & is_text_mask]
+                selector = torch.randperm(valid_ids.numel())[:remain_budget]
+                select_ids = torch.cat([select_ids, valid_ids[selector]], dim=0)
+
+            # topk_selector = torch.topk(label[text_ids], k=text_budget).indices
+            # select_ids = text_ids[topk_selector]
+            
+            # selector = torch.randperm(text_ids.numel(), device=text_ids.device)[:text_budget]
+            # select_ids = text_ids[selector]
 
         """剩下的budget是image的"""
         remain_budget = chunk_budget * bwd_chunk_size - select_ids.numel()
@@ -144,25 +167,32 @@ def _sample_tokens_v2(inputs_embeds, labels, attention_mask, image_masks, chunk_
             topk_selector = attn.topk(k=remain_budget).indices
             select_ids = torch.cat([select_ids, image_ids[topk_selector]], dim=0)
             remain_budget = chunk_budget * bwd_chunk_size - select_ids.numel()
-        valid_length.append(select_ids.numel())
+            
+            # selector = torch.randperm(image_ids.numel(), device='cuda')[:remain_budget]
+            # select_ids = torch.cat([select_ids, image_ids[selector]])
+            # remain_budget = chunk_budget * bwd_chunk_size - select_ids.numel()
+
+
+        select_ids = select_ids.sort()
+        sparse_label = label[select_ids]
 
         """多余的ids要通过padding来补齐"""
         if remain_budget > 0:
-            pad_ids = torch.zeros((remain_budget,), dtype=select_ids.dtype, device='cuda')
-            select_ids = torch.cat([select_ids, pad_ids], dim=0)
-            
+            pad_ids = torch.zeros((remain_budget,), dtype=torch.int32, dtype=select_ids.dtype, device='cuda')
+            pad_label = torch.full((remain_budget,), fill_value=-100, dtype=torch.int32, device='cuda')
+            select_ids = torch.cat([select_ids, pad_ids])
+            sparse_label = torch.cat([sparse_label, pad_label])
+
+        sparse_label = torch.gather(sparse_label, dim=-1, index=selector)
         indices.append(select_ids)
+        sparse_labels.append(sparse_label)
 
-    indices, _ = torch.stack(indices, dim=0).sort()
+    indices = torch.stack(indices)
+    sparse_labels = torch.stack(sparse_labels)
     pos_ids = indices
-    labels = torch.gather(labels, dim=-1, index=indices)
-
-    for i in range(len(valid_length)):
-        if valid_length[i] < chunk_budget * bwd_chunk_size:
-            labels[i, valid_length[i]:] = -100
 
     inputs_embeds_indices = indices.unsqueeze(-1).expand(-1, -1, inputs_embeds.shape[-1])
     inputs_embeds = torch.gather(inputs_embeds, dim=1, index=inputs_embeds_indices)
     inputs_embeds.requires_grad_(True)
 
-    return inputs_embeds, labels, pos_ids, indices
+    return inputs_embeds, sparse_labels, pos_ids, indices

@@ -190,8 +190,7 @@ def _spaco2(self, model, inputs):
         image_masks,
         chunk_budget,
         bwd_chunk_size,
-        attns,
-        raw_loss)
+        attns)
     
     seco_cache.squeeze()
     embeds_list, labels_list, position_list, indices_list = _chunkize_inputs(
@@ -244,6 +243,15 @@ def _spaco2(self, model, inputs):
         seco_cache.index(1).copy_scaled_grad(gd=sparse_grad)
         _backward(loss, model)
         seco_cache.delete(1)
+
+    # check raw loss
+    # sparse_raw_loss = torch.gather(raw_loss, dim=-1, index=sparse_indices)
+    # sparse_raw_loss = sparse_raw_loss.flatten()
+    # print(torch.dist(sparse_raw_loss, outputs['loss']))
+    # if not torch.allclose(sparse_raw_loss, outputs['loss'], atol=1e-3):
+    #     import IPython
+    #     IPython.embed()
+    # dist.barrier()
 
     inputs_embeds.register_hook(partial(
         _set_to_incomming_grad,
