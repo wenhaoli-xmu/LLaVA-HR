@@ -79,9 +79,9 @@ def _first_forward_prop_seco(model, inputs_embeds_list, labels_list, attention_m
         if not return_raw_loss:
             accum_loss += outputs['loss'].sum() / valid_label_count
         else:
-            raw_loss.append(outputs['loss'])
+            raw_loss.append(outputs['loss'].reshape(batch_size, -1))
 
-    return torch.cat(raw_loss, dim=-1).reshape(batch_size, -1) if return_raw_loss else accum_loss, seco_cache
+    return torch.cat(raw_loss, dim=-1) if return_raw_loss else accum_loss, seco_cache
 
 
 def _chunkize_inputs(tensor_list, chunk_size, dim=1):
@@ -173,17 +173,134 @@ def _sample_tokens_v2(inputs_embeds, labels, attention_mask, image_masks, chunk_
             # remain_budget = chunk_budget * bwd_chunk_size - select_ids.numel()
 
 
-        select_ids = select_ids.sort()
+        select_ids = select_ids.sort().values
         sparse_label = label[select_ids]
 
         """多余的ids要通过padding来补齐"""
         if remain_budget > 0:
-            pad_ids = torch.zeros((remain_budget,), dtype=torch.int32, dtype=select_ids.dtype, device='cuda')
-            pad_label = torch.full((remain_budget,), fill_value=-100, dtype=torch.int32, device='cuda')
+            pad_ids = torch.zeros((remain_budget,), dtype=select_ids.dtype, device='cuda')
+            pad_label = torch.full((remain_budget,), fill_value=-100, dtype=sparse_label.dtype, device='cuda')
             select_ids = torch.cat([select_ids, pad_ids])
             sparse_label = torch.cat([sparse_label, pad_label])
 
-        sparse_label = torch.gather(sparse_label, dim=-1, index=selector)
+        indices.append(select_ids)
+        sparse_labels.append(sparse_label)
+
+    indices = torch.stack(indices)
+    sparse_labels = torch.stack(sparse_labels)
+    pos_ids = indices
+
+    inputs_embeds_indices = indices.unsqueeze(-1).expand(-1, -1, inputs_embeds.shape[-1])
+    inputs_embeds = torch.gather(inputs_embeds, dim=1, index=inputs_embeds_indices)
+    inputs_embeds.requires_grad_(True)
+
+    return inputs_embeds, sparse_labels, pos_ids, indices
+
+
+@torch.no_grad()
+def _sample_tokens_v3(inputs_embeds, labels, attention_mask, image_masks, image_budget, attns):
+    indices = []
+    sparse_labels = []
+
+    # 首先找到所有instance中label数量最多的
+    num_labels_max = (labels != -100).sum(-1).max().item()
+    if dist.is_initialized():
+        local_labels_max = torch.tensor(num_labels_max, device='cuda')
+        global_labels_max = [torch.empty_like(local_labels_max) for _ in range(dist.get_world_size())]
+        dist.all_gather(global_labels_max, local_labels_max)
+        num_labels_max = max([x.item() for x in global_labels_max])
+
+    # 总的budget等于image部分加上labels部份
+    num_budget = num_labels_max + image_budget
+
+    for image_mask, attn, label in zip(image_masks, attns, labels):
+
+        remain_budget = num_budget
+
+        # 找到image部分的indices
+        full_ids = torch.arange(label.numel(), device='cuda')
+        image_ids = full_ids[image_mask]
+
+        # 首先将所有的labels部分选择
+        valid_label_mask = label != -100
+        arange = torch.arange(label.numel(), dtype=torch.int64, device='cuda')
+        select_ids = arange[valid_label_mask]
+        remain_budget -= select_ids.numel()
+
+        if image_ids.numel() > 0:
+            # 如果有图片，则图片部分选择image budget个token，根据attention分数来选择
+            topk_selector = attn.topk(k=image_budget).indices
+            select_ids = torch.cat([select_ids, image_ids[topk_selector]], dim=0)
+            remain_budget -= topk_selector.numel()
+
+        # 选择好了之后排序，并且获取标签
+        select_ids = select_ids.sort().values
+        sparse_label = label[select_ids]
+
+        # 剩余的部分需要通过padding来对其
+        if remain_budget > 0:
+            pad_ids = torch.zeros((remain_budget,), dtype=select_ids.dtype, device='cuda')
+            pad_label = torch.full((remain_budget,), fill_value=-100, dtype=sparse_label.dtype, device='cuda')
+            select_ids = torch.cat([select_ids, pad_ids])
+            sparse_label = torch.cat([sparse_label, pad_label])
+
+        indices.append(select_ids)
+        sparse_labels.append(sparse_label)
+
+    indices = torch.stack(indices)
+    sparse_labels = torch.stack(sparse_labels)
+    pos_ids = indices
+
+    inputs_embeds_indices = indices.unsqueeze(-1).expand(-1, -1, inputs_embeds.shape[-1])
+    inputs_embeds = torch.gather(inputs_embeds, dim=1, index=inputs_embeds_indices)
+    inputs_embeds.requires_grad_(True)
+
+    return inputs_embeds, sparse_labels, pos_ids, indices
+
+
+@torch.no_grad()
+def _sample_tokens_v4(inputs_embeds, labels, attention_mask, image_masks, image_budget, attns):
+    indices = []
+    sparse_labels = []
+
+    # 首先找到所有instance中label数量最多的
+    num_txt_max = (~image_masks).sum(-1).max().item()
+    if dist.is_initialized():
+        local_max = torch.tensor(num_txt_max, device='cuda')
+        global_max = [torch.empty_like(local_max) for _ in range(dist.get_world_size())]
+        dist.all_gather(global_max, local_max)
+        num_txt_max = max([x.item() for x in global_max])
+
+    # 总的budget等于image部分加上labels部份，其中32代表的是sink tokens
+    num_budget = num_txt_max + image_budget
+
+    for image_mask, attn, label in zip(image_masks, attns, labels):
+
+        # 选择所有的文字
+        mask = ~image_mask
+
+        # 选择图片部分
+        full_ids = torch.arange(mask.numel(), device='cuda')
+        image_ids = full_ids[image_mask]
+        if image_ids.numel() > 0:
+            # 如果有图片，则图片部分选择image budget个token，根据attention分数来选择
+            s = attn.topk(k=image_budget).indices
+            mask[s] = True
+
+        remain_budget = num_budget - mask.count_nonzero()
+        select_ids = full_ids[mask]
+
+        # 选择好了之后排序，并且获取标签
+        select_ids = select_ids.sort().values
+        sparse_label = label[select_ids]
+
+        # 剩余的部分需要通过padding来对其
+        if remain_budget > 0:
+            pad_ids = torch.zeros((remain_budget,), dtype=select_ids.dtype, device='cuda')
+            pad_label = torch.full((remain_budget,), fill_value=-100, dtype=sparse_label.dtype, device='cuda')
+            select_ids = torch.cat([select_ids, pad_ids])
+            sparse_label = torch.cat([sparse_label, pad_label])
+
         indices.append(select_ids)
         sparse_labels.append(sparse_label)
 

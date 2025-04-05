@@ -148,7 +148,7 @@ class MultiPathCLIPVisionTower(nn.Module):
 
         self.is_loaded = True
 
-    def forward(self, x):
+    def forward(self, x, return_attns=False):
 
         # fast & slow brach
         fast_blk = self.fast_vision_tower.vision_tower.vision_model.encoder.layers
@@ -239,7 +239,7 @@ class MultiPathCLIPVisionTower(nn.Module):
         #features combination
         y = self.align_stages[0](y, x)
 
-        return y, attns
+        return (y, attns) if return_attns else y
 
     def forward_features(self, x):
         assert  NotImplementedError

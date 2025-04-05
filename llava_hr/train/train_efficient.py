@@ -13,7 +13,9 @@ from .utils import (
     # _sample_chunks,
     _step,
     _construct_4d_mask,
-    _sample_tokens_v2
+    _sample_tokens_v2,
+    _sample_tokens_v3,
+    _sample_tokens_v4
 )
 
 
@@ -30,6 +32,7 @@ def reset_training_step(trainer):
         'v1-seco': _seco,
         'v1-spaco': _spaco,
         'v1-spaco2': _spaco2,
+        'v1-spaco3': _spaco3,
         }
     
     # v2 training step function
@@ -146,7 +149,7 @@ def visualize(inputs, attns):
 def _spaco2(self, model, inputs):
 
     fwd_chunk_size = 512
-    bwd_chunk_size = 384
+    bwd_chunk_size = 512
     chunk_budget = 1
 
     valid_label_count = (inputs['labels'] != -100).sum()
@@ -206,11 +209,143 @@ def _spaco2(self, model, inputs):
     neg_inf = torch.finfo(mask_4d.dtype).min
     generator = reversed(list(enumerate(zip(embeds_list, labels_list, position_list, indices_list))))
 
+    # backward propagation
     for i, (chunk_embeds, chunk_labels, chunk_position, chunk_indices) in generator:
         
         # reconstruct input attention mask
         window_size = chunk_indices.shape[-1]
 
+        # chunk_indices: [1,384] [1,1,384,1536]
+
+        chunk_mask_4d = torch.gather(
+            mask_4d, 
+            dim=2, 
+            index=chunk_indices[:, None, :, None].expand(-1, -1, -1, mask_4d.shape[-1]))
+        chunk_mask_4d.scatter_(
+            dim=-1, 
+            index=chunk_indices[:, None, None, :].expand(-1, -1, window_size, -1), 
+            value=neg_inf)
+        pad_mask_4d = torch.full(
+            size=(window_size, window_size), 
+            fill_value=neg_inf,
+            dtype=chunk_mask_4d.dtype, 
+            device=chunk_mask_4d.device)
+        pad_mask_4d = pad_mask_4d.triu(1)[None, None, :, :].expand(chunk_mask_4d.shape[0], -1, -1, -1)
+        mixed_mask_4d = torch.cat([chunk_mask_4d, pad_mask_4d], dim=-1)
+
+        outputs = model(
+            input_ids=None,
+            attention_mask=mixed_mask_4d,
+            inputs_embeds=chunk_embeds,
+            labels=chunk_labels,
+            position_ids=chunk_position,
+            past_key_values=seco_cache,
+            shift_label=False,
+            is_reduce=False)
+
+        loss = outputs['loss'].sum() / valid_label_count
+
+        # sparse_grad = seco_cache.index(0).collect_sparse_grad(chunk_indices)
+        # seco_cache.index(1).copy_scaled_grad(gd=sparse_grad)
+        _backward(loss, model)
+        # seco_cache.delete(1)
+
+    # delete seco cache
+    del seco_cache
+    torch.cuda.empty_cache()
+
+    if False:
+        l1 = torch.gather(raw_loss, dim=-1, index=sparse_indices)
+        l2 = outputs['loss'].reshape(8, -1)
+        if dist.get_rank() == 0:
+            for x, y in zip(l1, l2):
+                print(torch.dist(x, y))
+            import IPython
+            IPython.embed()
+        dist.barrier()
+        
+    inputs_embeds.register_hook(partial(
+        _set_to_incomming_grad,
+        incomming_grad=inputs_embeds_detach.grad,
+        indices=sparse_indices))
+    _backward(inputs_embeds.sum(), model)
+    _step(model, self.optimizer)
+
+    return accum_loss / self.args.gradient_accumulation_steps
+
+
+def _spaco3(self, model, inputs):
+
+    fwd_chunk_size = 512
+    bwd_chunk_size = 512
+    image_budget = 256
+
+    valid_label_count = (inputs['labels'] != -100).sum()
+
+    # vision tower前向传播
+    attention_mask, inputs_embeds, labels, image_masks, attns = _prepare_inputs(model, inputs)
+
+    if False:
+        visualize(inputs, attns)
+        if dist.get_rank() == 0:
+            import IPython
+            IPython.embed() 
+        dist.barrier()
+
+    # 构建 full causal mask
+    labels = torch.cat((labels[:, 1:], torch.full_like(labels[:, :1], fill_value=-100)), dim=-1)
+    mask_4d = _construct_4d_mask(
+        attention_mask, 
+        inputs_embeds.dtype, 
+        inputs_embeds.device)
+
+    # 将输入切分成块
+    embeds_list, labels_list = _chunkize_inputs(
+        [inputs_embeds.detach(), labels],
+        chunk_size=fwd_chunk_size)
+
+    # LLM部分前向传播
+    raw_loss, seco_cache = _first_forward_prop_seco(
+        model, 
+        embeds_list, 
+        labels_list, 
+        mask_4d, 
+        valid_label_count,
+        return_raw_loss=True)
+    accum_loss = raw_loss.sum() / valid_label_count
+    
+    # 选择一小部分tokens
+    inputs_embeds_detach, labels, position_ids, sparse_indices = _sample_tokens_v4(
+        inputs_embeds, 
+        labels,
+        attention_mask,
+        image_masks,
+        image_budget,
+        attns)
+    
+    # 将seco cache挤压在一起
+    seco_cache.squeeze()
+    embeds_list, labels_list, position_list, indices_list = _chunkize_inputs(
+        (inputs_embeds_detach, labels, position_ids, sparse_indices),
+        chunk_size=bwd_chunk_size)
+
+    # recompute valid label count
+    new_valid_label_count = 0
+    for chunk_labels in labels_list:
+        new_valid_label_count += (chunk_labels != -100).count_nonzero().item()
+
+    # 局部验证
+    assert valid_label_count == new_valid_label_count
+
+    # LLM backward prop
+    neg_inf = torch.finfo(mask_4d.dtype).min
+    generator = reversed(list(enumerate(zip(embeds_list, labels_list, position_list, indices_list))))
+
+    # backward propagation
+    for i, (chunk_embeds, chunk_labels, chunk_position, chunk_indices) in generator:
+        window_size = chunk_indices.shape[-1]
+
+        # 构建一个mixed attention mask
         chunk_mask_4d = torch.gather(
             mask_4d, 
             dim=2, 
@@ -244,15 +379,20 @@ def _spaco2(self, model, inputs):
         _backward(loss, model)
         seco_cache.delete(1)
 
-    # check raw loss
-    # sparse_raw_loss = torch.gather(raw_loss, dim=-1, index=sparse_indices)
-    # sparse_raw_loss = sparse_raw_loss.flatten()
-    # print(torch.dist(sparse_raw_loss, outputs['loss']))
-    # if not torch.allclose(sparse_raw_loss, outputs['loss'], atol=1e-3):
-    #     import IPython
-    #     IPython.embed()
-    # dist.barrier()
+    # delete seco cache
+    del seco_cache
+    torch.cuda.empty_cache()
 
+    if False:
+        l1 = torch.gather(raw_loss, dim=-1, index=sparse_indices)
+        l2 = outputs['loss'].reshape(8, -1)
+        if dist.get_rank() == 0:
+            for x, y in zip(l1, l2):
+                print(torch.dist(x, y))
+            import IPython
+            IPython.embed()
+        dist.barrier()
+        
     inputs_embeds.register_hook(partial(
         _set_to_incomming_grad,
         incomming_grad=inputs_embeds_detach.grad,
@@ -261,6 +401,7 @@ def _spaco2(self, model, inputs):
     _step(model, self.optimizer)
 
     return accum_loss / self.args.gradient_accumulation_steps
+
 
 
 def _spaco(self, model, inputs):
